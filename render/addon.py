@@ -1,7 +1,72 @@
+"""
+MindDraw Addon - Blender 5.0 Grease Pencil Integration
+
+IMPORTANT NOTES FOR BLENDER 5.0 GREASE PENCIL API:
+
+=== DATA STRUCTURE CHANGES ===
+1. Frame -> Drawing -> Strokes hierarchy:
+   - OLD: frame.strokes (ERROR: AttributeError)
+   - NEW: frame.drawing.strokes ✓
+
+2. Point coordinates:
+   - OLD: point.co (ERROR: AttributeError)
+   - NEW: point.position ✓
+
+3. Layer access:
+   - OLD: layers.active returns string name
+   - NEW: layers.active returns GreasePencilLayer object directly
+   - Use: active_layer.name to get name string
+
+4. Collection access:
+   - ERROR: bpy_prop_collection.get(key) when key is object, not string
+   - FIX: Use direct indexing or check object types first
+
+=== CRITICAL API USAGE ===
+1. Mode detection:
+   - Draw mode: context.mode == 'PAINT_GREASE_PENCIL'
+   - Edit mode: context.mode.startswith('EDIT_')
+
+2. Object selection:
+   - Use: bpy.context.selected_objects for stable access
+   - Filter: [obj for obj in context.selected_objects if obj.type == 'GREASEPENCIL']
+
+3. Grease Pencil access:
+   - Use: bpy.context.grease_pencil for stable access
+   - Layers: gp.layers.active (returns object)
+   - Active layer: gp.layers.active.name (returns string)
+
+4. Stroke creation:
+   - API: bpy.ops.grease_pencil.brush_stroke(stroke=points)
+   - Point format: (x, y, z, pressure, strength)
+   - Circle generation: 32 segments for smooth circle
+
+=== ERROR RESOLUTION EXPERIENCE ===
+1. Always verify attributes with dir() in terminal before use
+2. Check object types when using collection methods
+3. Use try-except blocks for API compatibility
+4. Remove all icons for Blender 5.0 compatibility
+
+=== CIRCLE STROKE CREATION ===
+1. Generate 32 points: for i in range(33) # +1 to close circle
+2. Calculate coordinates:
+   - x = radius * cos(2π * i / 32)
+   - y = radius * sin(2π * i / 32)
+3. Point format: (x, y, z, pressure, strength)
+4. Only show button in Draw mode: if context.mode == 'PAINT_GREASE_PENCIL'
+
+=== DEBUGGING TIPS ===
+1. Use terminal to test API calls before implementation
+2. Check context.mode for current mode
+3. Verify object types with obj.type
+4. Use hasattr() for attribute existence checks
+"""
+
 import bpy
 import sys
 import io
 import os
+import math
+from typing import List
 from bpy.types import Panel, Operator, PropertyGroup
 from bpy.props import StringProperty
 
@@ -48,8 +113,8 @@ class MINDDRAW_OT_execute_script(Operator):
     bl_label = "Execute Script"
     bl_options = {"REGISTER", "UNDO"}
 
-    def execute(self, context):
-        props = context.scene.mindraw_props
+    def execute(self, context: bpy.types.Context) -> set[str]:
+        props: MindDrawProperties = context.scene.mindraw_props
 
         if not props.script_code.strip():
             self.report({"WARNING"}, "No script to execute")
@@ -96,7 +161,7 @@ class MINDDRAW_OT_clear_script(Operator):
     bl_idname = "mindraw.clear_script"
     bl_label = "Clear Script"
 
-    def execute(self, context):
+    def execute(self, context: bpy.types.Context) -> set[str]:
         context.scene.mindraw_props.script_code = ""
         return {"FINISHED"}
 
@@ -107,7 +172,7 @@ class MINDDRAW_OT_clear_output(Operator):
     bl_idname = "mindraw.clear_output"
     bl_label = "Clear Output"
 
-    def execute(self, context):
+    def execute(self, context: bpy.types.Context) -> set[str]:
         context.scene.mindraw_props.output_text = "Output will appear here..."
         return {"FINISHED"}
 
@@ -118,11 +183,11 @@ class MINDDRAW_OT_get_view_context(Operator):
     bl_idname = "mindraw.get_view_context"
     bl_label = "Get View Context"
 
-    def execute(self, context):
-        props = context.scene.mindraw_props
+    def execute(self, context: bpy.types.Context) -> set[str]:
+        props: MindDrawProperties = context.scene.mindraw_props
 
         # Collect view context information
-        context_info = []
+        context_info: List[str] = []
 
         # Scene information
         context_info.append(f"Scene: {context.scene.name}")
@@ -139,7 +204,7 @@ class MINDDRAW_OT_get_view_context(Operator):
             context_info.append("No objects selected")
 
         # Visible objects in viewport (simplified - first 10)
-        visible_objects = []
+        visible_objects: List[str] = []
         for obj in context.scene.objects:
             if obj.visible_get() and len(visible_objects) < 10:
                 visible_objects.append(f"{obj.name} ({obj.type})")
@@ -180,9 +245,9 @@ class MINDDRAW_OT_get_view_context(Operator):
         self.report({"INFO"}, "View context captured")
         return {"FINISHED"}
 
-    def _get_armature_details(self, armature_obj):
+    def _get_armature_details(self, armature_obj: bpy.types.Object) -> List[str]:
         """Get detailed information about armature bones and hierarchy"""
-        details = []
+        details: List[str] = []
         details.append("")
         details.append("  Armature Details:")
         details.append(f"    Total bones: {len(armature_obj.data.bones)}")
@@ -218,9 +283,11 @@ class MINDDRAW_OT_get_view_context(Operator):
 
         return details
 
-    def _get_bone_hierarchy_info(self, bone, armature_obj, prefix):
+    def _get_bone_hierarchy_info(
+        self, bone: bpy.types.Bone, armature_obj: bpy.types.Object, prefix: str
+    ) -> List[str]:
         """Get recursive bone hierarchy information"""
-        info = []
+        info: List[str] = []
 
         # Bone basic info
         bone_name = bone.name
@@ -407,27 +474,294 @@ class MINDDRAW_OT_filedir_talk(Operator):
             return {"CANCELLED"}
 
 
+class MINDDRAW_OT_create_circle_stroke(Operator):
+    """Create a circle stroke on selected Grease Pencil layer"""
+
+    bl_idname = "mindraw.create_circle_stroke"
+    bl_label = "Create Circle"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        # Check if we're in Grease Pencil Draw mode
+        if context.mode != "PAINT_GREASE_PENCIL":
+            self.report({"WARNING"}, "Only works in Grease Pencil Draw mode")
+            return {"CANCELLED"}
+
+        # Check if a Grease Pencil object is selected
+        gp_objects = [
+            obj for obj in context.selected_objects if obj.type == "GREASEPENCIL"
+        ]
+        if not gp_objects:
+            self.report({"WARNING"}, "No Grease Pencil object selected")
+            return {"CANCELLED"}
+
+        try:
+            # Use bpy.context.grease_pencil for stable access
+            gp = bpy.context.grease_pencil
+
+            # Get active layer
+            active_layer = gp.layers.active
+            if not active_layer:
+                self.report({"WARNING"}, "No active Grease Pencil layer")
+                return {"CANCELLED"}
+
+            # Use the first frame (simplest and most reliable approach)
+            frame = active_layer.frames[0]
+
+            # Get drawing
+            drawing = frame.drawing
+
+            # Create new stroke with 33 points (32 segments + 1 to close circle)
+            drawing.add_strokes([33])
+            stroke = drawing.strokes[-1]
+
+            # Generate circle points (32 segments to make a smooth circle)
+            radius = 1.0
+            segments = 32
+
+            for i in range(segments + 1):  # +1 to close the circle
+                angle = 2 * math.pi * i / segments
+                x = radius * math.cos(angle)
+                y = radius * math.sin(angle)
+                z = 0.0
+
+                # Set point properties directly (only position is available in Blender 5.0)
+                stroke.points[i].position = (x, y, z)
+
+            self.report({"INFO"}, "Circle stroke created successfully")
+            return {"FINISHED"}
+
+        except Exception as e:
+            self.report({"ERROR"}, f"Failed to create circle stroke: {str(e)}")
+            return {"CANCELLED"}
+
+
 class MINDDRAW_PT_script_panel(Panel):
     """Main panel for Python script execution"""
 
-    bl_label = "MindDraw Script Executor"
+    bl_label = "MindDraw Panel"
     bl_idname = "MINDDRAW_PT_script_panel"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
     bl_category = "MindDraw"
 
-    def draw(self, context):
+    def draw(self, context: bpy.types.Context) -> None:
         layout = self.layout
-        props = context.scene.mindraw_props
+        props: MindDrawProperties = context.scene.mindraw_props
 
         # Title
         box = layout.box()
-        box.label(text="Python Script Executor", icon="SCRIPT")
-        box.label(text="Execute Python code in Blender", icon="INFO")
+        box.label(text="Python Script Executor")
+        box.label(text="Execute Python code in Blender")
+
+        # Status Information
+        layout.separator()
+        status_box = layout.box()
+        status_box.label(text="Current Status")
+
+        # Active Window Information
+        if context.window:
+            status_box.label(
+                text=f"Active Window: {context.window.width}x{context.window.height}"
+            )
+
+        # Current Interactive Mode
+        current_mode = context.mode
+        mode_display = current_mode.replace("_", " ").title()
+        status_box.label(text=f"Current Mode: {mode_display}")
+
+        # Area Type Information
+        if context.area:
+            area_type = context.area.type
+            status_box.label(text=f"Area Type: {area_type}")
+
+        # Screen Information
+        if context.screen:
+            status_box.label(text=f"Screen: {context.screen.name}")
+
+        # Debug information
+        status_box.separator()
+        status_box.label(text="Debug Info:")
+        status_box.label(text=f"  Mode: '{context.mode}'")
+        status_box.label(
+            text=f"  Active Object: {context.active_object.name if context.active_object else 'None'}"
+        )
+        if context.active_object:
+            status_box.label(text=f"  Object Type: {context.active_object.type}")
+
+        # Edit Mode Object Information (only show in Edit mode)
+        is_edit_mode = context.mode.startswith("EDIT_")
+        status_box.label(text=f"  Is Edit Mode: {is_edit_mode}")
+
+        if is_edit_mode and context.active_object:
+            obj = context.active_object
+            status_box.separator()
+            status_box.label(text="Edit Mode Object Info:")
+            status_box.label(text=f"  Object: {obj.name} ({obj.type})")
+
+            # Object transform info
+            status_box.label(
+                text=f"  Location: ({obj.location.x:.2f}, {obj.location.y:.2f}, {obj.location.z:.2f})"
+            )
+
+            # Edit mode specific information
+            try:
+                if hasattr(obj.data, "total_verts"):
+                    status_box.label(text=f"  Vertices: {obj.data.total_verts}")
+                if hasattr(obj.data, "total_edges"):
+                    status_box.label(text=f"  Edges: {obj.data.total_edges}")
+                if hasattr(obj.data, "total_polygons"):
+                    status_box.label(text=f"  Faces: {obj.data.total_polygons}")
+            except Exception as e:
+                status_box.label(text=f"  Data Error: {str(e)}")
+
+            # Selection mode info
+            try:
+                if obj.type == "GREASEPENCIL":
+                    # Grease Pencil selection mode
+                    if hasattr(context.tool_settings, "gpencil_select_mode"):
+                        gp_mode = context.tool_settings.gpencil_select_mode
+                        mode_map = {0: "POINT", 1: "STROKE", 2: "SEGMENT"}
+                        mode_text = mode_map.get(gp_mode, "UNKNOWN")
+                        status_box.label(text=f"  GPencil Select Mode: {mode_text}")
+                elif hasattr(context.tool_settings, "mesh_select_mode"):
+                    # Mesh selection mode
+                    select_mode = context.tool_settings.mesh_select_mode
+                    mode_text = []
+                    if select_mode[0]:
+                        mode_text.append("Vertex")
+                    if select_mode[1]:
+                        mode_text.append("Edge")
+                    if select_mode[2]:
+                        mode_text.append("Face")
+                    if mode_text:
+                        status_box.label(text=f"  Select Mode: {', '.join(mode_text)}")
+            except Exception as e:
+                status_box.label(text=f"  Select Mode Error: {str(e)}")
+
+            # Selected points information
+            try:
+                if obj.type == "GREASEPENCIL":
+                    # Grease Pencil selection information
+                    selected_points = []
+                    selected_strokes = []
+
+                    # Use bpy.context.grease_pencil for stable access
+                    gp = bpy.context.grease_pencil
+
+                    # Get active layer object (layers.active returns GreasePencilLayer object directly)
+                    try:
+                        active_layer = (
+                            gp.layers.active if hasattr(gp, "layers") else None
+                        )
+                        active_layer_name = (
+                            active_layer.name if active_layer else "Unknown"
+                        )
+                    except:
+                        active_layer = None
+                        active_layer_name = "Unknown"
+
+                    # Process the active layer
+                    if active_layer:
+                        for frame in active_layer.frames:
+                            drawing = frame.drawing
+                            if hasattr(drawing, "strokes"):
+                                for stroke in drawing.strokes:
+                                    if stroke.select:
+                                        selected_strokes.append(stroke)
+                                    for point in stroke.points:
+                                        if point.select:
+                                            selected_points.append(point)
+
+                    status_box.label(text=f"  Active Layer: {active_layer_name}")
+                    status_box.label(text=f"  Selected Points: {len(selected_points)}")
+                    status_box.label(
+                        text=f"  Selected Strokes: {len(selected_strokes)}"
+                    )
+
+                    # Show detailed info for first 3 selected points
+                    for i, point in enumerate(selected_points[:3]):
+                        world_pos = obj.matrix_world @ point.position
+                        status_box.label(
+                            text=f"    P{i}: ({point.position.x:.2f}, {point.position.y:.2f}, {point.position.z:.2f})"
+                        )
+
+                    if len(selected_points) > 3:
+                        status_box.label(
+                            text=f"    ... and {len(selected_points) - 3} more"
+                        )
+
+                    # Show detailed info for first 2 selected strokes
+                    for i, stroke in enumerate(selected_strokes[:2]):
+                        status_box.label(
+                            text=f"    Stroke {i}: {len(stroke.points)} points"
+                        )
+
+                    if len(selected_strokes) > 2:
+                        status_box.label(
+                            text=f"    ... and {len(selected_strokes) - 2} more"
+                        )
+
+                elif hasattr(obj.data, "vertices"):
+                    # Mesh selection information
+                    selected_vertices = [v for v in obj.data.vertices if v.select]
+                    status_box.label(
+                        text=f"  Selected Vertices: {len(selected_vertices)}"
+                    )
+
+                    # Show detailed info for first 5 selected vertices
+                    for i, vertex in enumerate(selected_vertices[:5]):
+                        world_pos = obj.matrix_world @ vertex.co
+                        status_box.label(
+                            text=f"    V{vertex.index}: ({vertex.co.x:.2f}, {vertex.co.y:.2f}, {vertex.co.z:.2f})"
+                        )
+
+                    if len(selected_vertices) > 5:
+                        status_box.label(
+                            text=f"    ... and {len(selected_vertices) - 5} more"
+                        )
+
+                if hasattr(obj.data, "edges"):
+                    selected_edges = [e for e in obj.data.edges if e.select]
+                    status_box.label(text=f"  Selected Edges: {len(selected_edges)}")
+
+                    # Show detailed info for first 3 selected edges
+                    for i, edge in enumerate(selected_edges[:3]):
+                        status_box.label(
+                            text=f"    E{edge.index}: vertices {edge.vertices[0]}-{edge.vertices[1]}"
+                        )
+
+                    if len(selected_edges) > 3:
+                        status_box.label(
+                            text=f"    ... and {len(selected_edges) - 3} more"
+                        )
+
+                if hasattr(obj.data, "polygons"):
+                    selected_faces = [f for f in obj.data.polygons if f.select]
+                    status_box.label(text=f"  Selected Faces: {len(selected_faces)}")
+
+                    # Show detailed info for first 3 selected faces
+                    for i, face in enumerate(selected_faces[:3]):
+                        verts_str = "-".join(
+                            str(v) for v in face.vertices[:4]
+                        )  # Show first 4 vertices
+                        if len(face.vertices) > 4:
+                            verts_str += "..."
+                        status_box.label(
+                            text=f"    F{face.index}: vertices {verts_str}"
+                        )
+
+                    if len(selected_faces) > 3:
+                        status_box.label(
+                            text=f"    ... and {len(selected_faces) - 3} more"
+                        )
+
+            except Exception as e:
+                status_box.label(text=f"  Selection Error: {str(e)}")
 
         # Script input area
         layout.separator()
-        layout.label(text="Script Input:", icon="TEXT")
+        layout.label(text="Script Input:")
         script_box = layout.box()
         script_box.scale_y = 0.8
         script_box.prop(props, "script_code", text="")
@@ -435,34 +769,40 @@ class MINDDRAW_PT_script_panel(Panel):
         # Buttons
         layout.separator()
         row = layout.row(align=True)
-        row.operator("mindraw.execute_script", icon="PLAY")
-        row.operator("mindraw.clear_script", icon="TRASH")
-        row.operator("mindraw.clear_output", icon="X")
+        row.operator("mindraw.execute_script")
+        row.operator("mindraw.clear_script")
+        row.operator("mindraw.clear_output")
 
         # View context buttons
         layout.separator()
         row = layout.row(align=True)
-        row.operator("mindraw.get_view_context", icon="VIEWZOOM")
-        row.operator("mindraw.copy_to_clipboard", icon="COPYDOWN")
+        row.operator("mindraw.get_view_context")
+        row.operator("mindraw.copy_to_clipboard")
+
+        # Grease Pencil Draw mode buttons (only show in Draw mode)
+        if context.mode == "PAINT_GREASE_PENCIL":
+            layout.separator()
+            row = layout.row(align=True)
+            row.operator("mindraw.create_circle_stroke")
 
         # FileTalk section
         layout.separator()
         box = layout.box()
-        box.label(text="FileTalk Communication", icon="FILE_FOLDER")
-        box.label(text="File-based AI integration", icon="INFO")
+        box.label(text="FileTalk Communication")
+        box.label(text="File-based AI integration")
 
         layout.separator()
-        layout.label(text="FileTalk Directory:", icon="FILE_FOLDER")
+        layout.label(text="FileTalk Directory:")
         layout.prop(props, "filetalk_directory", text="")
 
         layout.separator()
         row = layout.row(align=True)
-        row.operator("mindraw.create_filedir", icon="FILE_NEW")
-        row.operator("mindraw.filedir_talk", icon="MODIFIER")
+        row.operator("mindraw.create_filedir")
+        row.operator("mindraw.filedir_talk")
 
         # Output area
         layout.separator()
-        layout.label(text="Output:", icon="CONSOLE")
+        layout.label(text="Output:")
         output_box = layout.box()
         output_box.scale_y = 0.6
         output_box.prop(props, "output_text", text="", emboss=False)
@@ -478,6 +818,7 @@ def register():
     bpy.utils.register_class(MINDDRAW_OT_copy_to_clipboard)
     bpy.utils.register_class(MINDDRAW_OT_create_filedir)
     bpy.utils.register_class(MINDDRAW_OT_filedir_talk)
+    bpy.utils.register_class(MINDDRAW_OT_create_circle_stroke)
     bpy.utils.register_class(MINDDRAW_PT_script_panel)
 
     # Register properties to scene
@@ -495,6 +836,7 @@ def unregister():
     bpy.utils.unregister_class(MINDDRAW_OT_clear_output)
     bpy.utils.unregister_class(MINDDRAW_OT_clear_script)
     bpy.utils.unregister_class(MINDDRAW_OT_execute_script)
+    bpy.utils.unregister_class(MINDDRAW_OT_create_circle_stroke)
     bpy.utils.unregister_class(MindDrawProperties)
 
 
