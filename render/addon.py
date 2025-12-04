@@ -66,9 +66,11 @@ import sys
 import io
 import os
 import math
+import json
 from typing import List
 from bpy.types import Panel, Operator, PropertyGroup
 from bpy.props import StringProperty
+from bpy_extras.io_utils import ImportHelper
 
 bl_info = {
     "name": "MindDraw Addon",
@@ -103,6 +105,13 @@ class MindDrawProperties(PropertyGroup):
         description="Directory for file-based communication",
         default="",
         subtype="DIR_PATH",
+    )
+
+    json_file_path: StringProperty(
+        name="JSON File",
+        description="Path to JSON file for import/export",
+        default="",
+        subtype="FILE_PATH",
     )
 
 
@@ -474,6 +483,211 @@ class MINDDRAW_OT_filedir_talk(Operator):
             return {"CANCELLED"}
 
 
+class MINDDRAW_OT_select_json_file(Operator, ImportHelper):
+    """Select JSON file for import/export"""
+    
+    bl_idname = "mindraw.select_json_file"
+    bl_label = "Select JSON File"
+    bl_options = {"REGISTER", "UNDO"}
+    
+    filename_ext = ".json"
+    filter_glob: StringProperty(
+        default="*.json",
+        options={"HIDDEN"},
+        maxlen=255,
+    )
+    
+    def execute(self, context):
+        props = context.scene.mindraw_props
+        props.json_file_path = self.filepath
+        self.report({"INFO"}, f"JSON file selected: {self.filepath}")
+        return {"FINISHED"}
+
+
+class MINDDRAW_OT_draw_from_json(Operator):
+    """Draw Grease Pencil strokes from JSON file"""
+
+    bl_idname = "mindraw.draw_from_json"
+    bl_label = "Draw from JSON"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        props = context.scene.mindraw_props
+
+        if not props.json_file_path.strip():
+            self.report({"WARNING"}, "Please select a JSON file first")
+            return {"CANCELLED"}
+
+        # Check if we're in Grease Pencil Draw mode
+        if context.mode != "PAINT_GREASE_PENCIL":
+            self.report({"WARNING"}, "Only works in Grease Pencil Draw mode")
+            return {"CANCELLED"}
+
+        # Check if we have access to Grease Pencil
+        gp = bpy.context.grease_pencil
+        if not gp:
+            # Try to create a new Grease Pencil object
+            try:
+                bpy.ops.grease_pencil.add()
+                gp = bpy.context.grease_pencil
+                if not gp:
+                    self.report({"ERROR"}, "Failed to create Grease Pencil object")
+                    return {"CANCELLED"}
+                self.report({"INFO"}, "Created new Grease Pencil object")
+            except Exception as e:
+                self.report({"ERROR"}, f"Failed to create Grease Pencil: {str(e)}")
+                return {"CANCELLED"}
+
+        try:
+            # Read JSON file
+            with open(props.json_file_path, 'r') as f:
+                json_data = json.load(f)
+
+            # Get image data
+            image_data = json_data.get("image_data", {})
+            layers = image_data.get("layers", [])
+
+            if not layers:
+                self.report({"WARNING"}, "No layers found in JSON file")
+                return {"CANCELLED"}
+
+            # Use bpy.context.grease_pencil for stable access
+            gp = bpy.context.grease_pencil
+
+            # Process each layer
+            for layer_data in layers:
+                layer_name = layer_data.get("name", "Unknown Layer")
+                strokes = layer_data.get("strokes", [])
+
+                # Create new layer
+                bpy.ops.grease_pencil.layer_add()
+                new_layer = bpy.context.grease_pencil.layers.active
+                new_layer.name = layer_name
+
+                # Get the first frame
+                if not new_layer.frames:
+                    new_layer.frames.new(frame_number=1)
+                frame = new_layer.frames[0]
+                drawing = frame.drawing
+
+                # Process each stroke
+                for stroke_data in strokes:
+                    points = stroke_data.get("points", [])
+                    if not points:
+                        continue
+
+                    # Create stroke
+                    drawing.add_strokes([len(points)])
+                    stroke = drawing.strokes[-1]
+
+                    # Set point positions (direct coordinate mapping)
+                    for i, point_data in enumerate(points):
+                        x = point_data.get("x", 0.0)
+                        z = point_data.get("z", 0.0)
+                        y = 0.0  # X-Z plane, so Y is 0
+                        stroke.points[i].position = (x, y, z)
+
+            self.report({"INFO"}, f"Successfully drew {len(layers)} layers from JSON")
+            return {"FINISHED"}
+
+        except Exception as e:
+            self.report({"ERROR"}, f"Failed to draw from JSON: {str(e)}")
+            return {"CANCELLED"}
+
+
+class MINDDRAW_OT_sync_to_json(Operator):
+    """Sync Grease Pencil data to JSON file"""
+
+    bl_idname = "mindraw.sync_to_json"
+    bl_label = "Sync to JSON"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        props = context.scene.mindraw_props
+
+        if not props.json_file_path.strip():
+            self.report({"WARNING"}, "Please select a JSON file first")
+            return {"CANCELLED"}
+
+        # Check if we're in Grease Pencil Draw mode
+        if context.mode != "PAINT_GREASE_PENCIL":
+            self.report({"WARNING"}, "Only works in Grease Pencil Draw mode")
+            return {"CANCELLED"}
+
+        # Check if we have access to Grease Pencil
+        gp = bpy.context.grease_pencil
+        if not gp:
+            # Try to create a new Grease Pencil object
+            try:
+                bpy.ops.grease_pencil.add()
+                gp = bpy.context.grease_pencil
+                if not gp:
+                    self.report({"ERROR"}, "Failed to create Grease Pencil object")
+                    return {"CANCELLED"}
+                self.report({"INFO"}, "Created new Grease Pencil object")
+            except Exception as e:
+                self.report({"ERROR"}, f"Failed to create Grease Pencil: {str(e)}")
+                return {"CANCELLED"}
+
+        try:
+            # Use bpy.context.grease_pencil for stable access
+            gp = bpy.context.grease_pencil
+
+            # Prepare JSON structure
+            json_data = {
+                "image_data": {
+                    "description": "Simplified storyboard sketch data, grouped by objects with color mapping.",
+                    "layers": []
+                }
+            }
+
+            # Process each layer
+            for layer in gp.layers:
+                layer_data = {
+                    "name": layer.name,
+                    "color": {"r": 0, "g": 0, "b": 0},  # Default black color
+                    "description": f"Layer {layer.name}",
+                    "strokes": []
+                }
+
+                # Process each frame (use first frame)
+                if layer.frames:
+                    frame = layer.frames[0]
+                    drawing = frame.drawing
+
+                    # Process each stroke
+                    for i, stroke in enumerate(drawing.strokes):
+                        stroke_data = {
+                            "id": i + 1,
+                            "label": f"stroke_{i + 1}",
+                            "type": "line",  # Default to line type
+                            "points": []
+                        }
+
+                        # Extract points (direct coordinate mapping)
+                        for point in stroke.points:
+                            point_data = {
+                                "x": round(point.position.x, 1),
+                                "z": round(point.position.z, 1)
+                            }
+                            stroke_data["points"].append(point_data)
+
+                        layer_data["strokes"].append(stroke_data)
+
+                json_data["image_data"]["layers"].append(layer_data)
+
+            # Write to JSON file
+            with open(props.json_file_path, 'w') as f:
+                json.dump(json_data, f, indent=2)
+
+            self.report({"INFO"}, f"Successfully synced {len(gp.layers)} layers to JSON")
+            return {"FINISHED"}
+
+        except Exception as e:
+            self.report({"ERROR"}, f"Failed to sync to JSON: {str(e)}")
+            return {"CANCELLED"}
+
+
 class MINDDRAW_OT_create_circle_stroke(Operator):
     """Create a circle stroke on selected Grease Pencil layer"""
 
@@ -487,13 +701,20 @@ class MINDDRAW_OT_create_circle_stroke(Operator):
             self.report({"WARNING"}, "Only works in Grease Pencil Draw mode")
             return {"CANCELLED"}
 
-        # Check if a Grease Pencil object is selected
-        gp_objects = [
-            obj for obj in context.selected_objects if obj.type == "GREASEPENCIL"
-        ]
-        if not gp_objects:
-            self.report({"WARNING"}, "No Grease Pencil object selected")
-            return {"CANCELLED"}
+        # Check if we have access to Grease Pencil
+        gp = bpy.context.grease_pencil
+        if not gp:
+            # Try to create a new Grease Pencil object
+            try:
+                bpy.ops.grease_pencil.add()
+                gp = bpy.context.grease_pencil
+                if not gp:
+                    self.report({"ERROR"}, "Failed to create Grease Pencil object")
+                    return {"CANCELLED"}
+                self.report({"INFO"}, "Created new Grease Pencil object")
+            except Exception as e:
+                self.report({"ERROR"}, f"Failed to create Grease Pencil: {str(e)}")
+                return {"CANCELLED"}
 
         try:
             # Use bpy.context.grease_pencil for stable access
@@ -522,8 +743,8 @@ class MINDDRAW_OT_create_circle_stroke(Operator):
             for i in range(segments + 1):  # +1 to close the circle
                 angle = 2 * math.pi * i / segments
                 x = radius * math.cos(angle)
-                y = radius * math.sin(angle)
-                z = 0.0
+                y = 0.0  # Fixed Y coordinate for X-Z plane
+                z = radius * math.sin(angle)  # Use Z for the circular motion
 
                 # Set point properties directly (only position is available in Blender 5.0)
                 stroke.points[i].position = (x, y, z)
@@ -785,6 +1006,21 @@ class MINDDRAW_PT_script_panel(Panel):
             row = layout.row(align=True)
             row.operator("mindraw.create_circle_stroke")
 
+        # JSON Import/Export section
+        layout.separator()
+        box = layout.box()
+        box.label(text="JSON Import/Export")
+        box.label(text="Grease Pencil data exchange")
+
+        layout.separator()
+        layout.label(text="JSON File:")
+        layout.prop(props, "json_file_path", text="")
+
+        layout.separator()
+        row = layout.row(align=True)
+        row.operator("mindraw.draw_from_json")
+        row.operator("mindraw.sync_to_json")
+
         # FileTalk section
         layout.separator()
         box = layout.box()
@@ -818,6 +1054,9 @@ def register():
     bpy.utils.register_class(MINDDRAW_OT_copy_to_clipboard)
     bpy.utils.register_class(MINDDRAW_OT_create_filedir)
     bpy.utils.register_class(MINDDRAW_OT_filedir_talk)
+    bpy.utils.register_class(MINDDRAW_OT_select_json_file)
+    bpy.utils.register_class(MINDDRAW_OT_draw_from_json)
+    bpy.utils.register_class(MINDDRAW_OT_sync_to_json)
     bpy.utils.register_class(MINDDRAW_OT_create_circle_stroke)
     bpy.utils.register_class(MINDDRAW_PT_script_panel)
 
@@ -836,6 +1075,9 @@ def unregister():
     bpy.utils.unregister_class(MINDDRAW_OT_clear_output)
     bpy.utils.unregister_class(MINDDRAW_OT_clear_script)
     bpy.utils.unregister_class(MINDDRAW_OT_execute_script)
+    bpy.utils.unregister_class(MINDDRAW_OT_select_json_file)
+    bpy.utils.unregister_class(MINDDRAW_OT_draw_from_json)
+    bpy.utils.unregister_class(MINDDRAW_OT_sync_to_json)
     bpy.utils.unregister_class(MINDDRAW_OT_create_circle_stroke)
     bpy.utils.unregister_class(MindDrawProperties)
 
