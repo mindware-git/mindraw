@@ -66,6 +66,7 @@ import sys
 import io
 import socket
 import threading
+import json
 
 # ============ COMMENTED OUT OLD IMPORTS ============
 # import os
@@ -132,53 +133,96 @@ def socket_server_thread():
     print("[MindDraw] Socket server stopped")
 
 
+def handle_execute_code(payload):
+    """Executes arbitrary Python code from the payload."""
+    python_code = payload.get("code")
+    if not python_code:
+        raise ValueError("Payload for 'execute_code' must contain a 'code' field.")
+
+    # Capture stdout while executing the code
+    old_stdout = sys.stdout
+    sys.stdout = captured_output = io.StringIO()
+    try:
+        exec_context = {"bpy": bpy, "context": bpy.context, "C": bpy.context}
+        exec(python_code, exec_context)
+        output = captured_output.getvalue()
+        if not output:
+            output = "Script executed successfully (no output)."
+        return {"output": output}
+    finally:
+        sys.stdout = old_stdout
+
+
+def handle_get_scene_info(payload):
+    """Gathers and returns basic information about the current scene."""
+    context = bpy.context
+    scene = context.scene
+    info = {
+        "scene_name": scene.name,
+        "object_count": len(scene.objects),
+        "active_object": context.active_object.name if context.active_object else None,
+        "selected_objects": [obj.name for obj in context.selected_objects],
+        "mode": context.mode,
+    }
+    return info
+
+
+# Command to Handler mapping
+COMMAND_MAP = {
+    "execute_code": handle_execute_code,
+    "get_scene_info": handle_get_scene_info,
+}
+
+
 def handle_client(conn):
-    """Handle individual client connection"""
+    """
+    Handle individual client connection.
+
+    This function acts as a router, parsing JSON requests from the client,
+    dispatching them to the appropriate handler based on the 'command' field,
+    and sending back a JSON response.
+    """
     try:
         with conn:
             while is_running:
-                # Receive data from client
+                # This assumes a single, complete JSON message is received per recv.
+                # For larger messages, a more robust stream reading protocol would be needed.
                 data = conn.recv(4096)
                 if not data:
                     break
 
-                # Decode and execute Python code
-                python_code = data.decode("utf-8")
-                print(f"[MindDraw] Received: {python_code[:100]}...")
-
+                response = {}
                 try:
-                    # Execute Python code
-                    old_stdout = sys.stdout
-                    sys.stdout = captured_output = io.StringIO()
+                    request_data = json.loads(data.decode("utf-8"))
+                    command = request_data.get("command")
+                    payload = request_data.get(
+                        "payload", {}
+                    )  # Default to empty dict for handlers that don't need it
 
-                    # Create execution context with Blender access
-                    exec_context = {
-                        "bpy": bpy,
-                        "context": bpy.context,
-                        "C": bpy.context,
+                    if command in COMMAND_MAP:
+                        handler = COMMAND_MAP[command]
+                        # All handlers should return a dictionary to be serialized
+                        result_data = handler(payload)
+                        response = {"status": "success", "data": result_data}
+                    else:
+                        raise ValueError(f"Unknown command: '{command}'")
+
+                except json.JSONDecodeError:
+                    response = {
+                        "status": "error",
+                        "error_message": "Invalid JSON format received.",
                     }
-
-                    exec(python_code, exec_context)
-
-                    # Get output
-                    output = captured_output.getvalue()
-                    if not output:
-                        output = "Script executed successfully (no output)"
-
-                    # Send result back to client
-                    result = f"SUCCESS: {output}"
-                    conn.sendall(result.encode("utf-8"))
-
                 except Exception as e:
-                    # Send error back to client
-                    error_msg = f"ERROR: {str(e)}"
-                    conn.sendall(error_msg.encode("utf-8"))
-
+                    # Catches errors from handlers (e.g., ValueError) or command dispatch
+                    response = {"status": "error", "error_message": str(e)}
                 finally:
-                    sys.stdout = old_stdout
+                    # Send the JSON response back to the client
+                    conn.sendall(json.dumps(response).encode("utf-8"))
 
+    except (ConnectionResetError, BrokenPipeError):
+        print(f"[MindDraw] Client disconnected gracefully.")
     except Exception as e:
-        print(f"[MindDraw] Client handling error: {e}")
+        print(f"[MindDraw] An unexpected error occurred in handle_client: {e}")
 
 
 # class MindDrawProperties(PropertyGroup):
