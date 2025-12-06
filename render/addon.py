@@ -1,81 +1,13 @@
-"""
-MindDraw Addon - Blender 5.0 Grease Pencil Integration
-
-IMPORTANT NOTES FOR BLENDER 5.0 GREASE PENCIL API:
-
-=== DATA STRUCTURE CHANGES ===
-1. Frame -> Drawing -> Strokes hierarchy:
-   - OLD: frame.strokes (ERROR: AttributeError)
-   - NEW: frame.drawing.strokes ✓
-
-2. Point coordinates:
-   - OLD: point.co (ERROR: AttributeError)
-   - NEW: point.position ✓
-
-3. Layer access:
-   - OLD: layers.active returns string name
-   - NEW: layers.active returns GreasePencilLayer object directly
-   - Use: active_layer.name to get name string
-
-4. Collection access:
-   - ERROR: bpy_prop_collection.get(key) when key is object, not string
-   - FIX: Use direct indexing or check object types first
-
-=== CRITICAL API USAGE ===
-1. Mode detection:
-   - Draw mode: context.mode == 'PAINT_GREASE_PENCIL'
-   - Edit mode: context.mode.startswith('EDIT_')
-
-2. Object selection:
-   - Use: bpy.context.selected_objects for stable access
-   - Filter: [obj for obj in context.selected_objects if obj.type == 'GREASEPENCIL']
-
-3. Grease Pencil access:
-   - Use: bpy.context.grease_pencil for stable access
-   - Layers: gp.layers.active (returns object)
-   - Active layer: gp.layers.active.name (returns string)
-
-4. Stroke creation:
-   - API: bpy.ops.grease_pencil.brush_stroke(stroke=points)
-   - Point format: (x, y, z, pressure, strength)
-   - Circle generation: 32 segments for smooth circle
-
-=== ERROR RESOLUTION EXPERIENCE ===
-1. Always verify attributes with dir() in terminal before use
-2. Check object types when using collection methods
-3. Use try-except blocks for API compatibility
-4. Remove all icons for Blender 5.0 compatibility
-
-=== CIRCLE STROKE CREATION ===
-1. Generate 32 points: for i in range(33) # +1 to close circle
-2. Calculate coordinates:
-   - x = radius * cos(2π * i / 32)
-   - y = radius * sin(2π * i / 32)
-3. Point format: (x, y, z, pressure, strength)
-4. Only show button in Draw mode: if context.mode == 'PAINT_GREASE_PENCIL'
-
-=== DEBUGGING TIPS ===
-1. Use terminal to test API calls before implementation
-2. Check context.mode for current mode
-3. Verify object types with obj.type
-4. Use hasattr() for attribute existence checks
-"""
-
 import bpy
 import sys
 import io
 import socket
 import threading
 import json
-
-# ============ COMMENTED OUT OLD IMPORTS ============
-# import os
-# import math
-# import json
-# from typing import List
-# from bpy.types import Panel, Operator, PropertyGroup
-# from bpy.props import StringProperty
-# from bpy_extras.io_utils import ImportHelper
+import math
+import os
+import tempfile
+from typing import Dict, Any, Tuple, List, Optional
 
 bl_info = {
     "name": "MindDraw Addon",
@@ -133,9 +65,9 @@ def socket_server_thread():
     print("[MindDraw] Socket server stopped")
 
 
-def handle_execute_code(payload):
+def handle_execute_code(payload: Dict[str, Any]) -> Dict[str, str]:
     """Executes arbitrary Python code from the payload."""
-    python_code = payload.get("code")
+    python_code: Optional[str] = payload.get("code")
     if not python_code:
         raise ValueError("Payload for 'execute_code' must contain a 'code' field.")
 
@@ -153,10 +85,10 @@ def handle_execute_code(payload):
         sys.stdout = old_stdout
 
 
-def handle_get_scene_info(payload):
+def handle_get_scene_info(payload: Dict[str, Any]) -> Dict[str, Any]:
     """Gathers and returns basic information about the current scene."""
-    context = bpy.context
-    scene = context.scene
+    context: bpy.types.Context = bpy.context
+    scene: bpy.types.Scene = context.scene
     info = {
         "scene_name": scene.name,
         "object_count": len(scene.objects),
@@ -167,10 +99,251 @@ def handle_get_scene_info(payload):
     return info
 
 
+def handle_get_blender_info(payload: Dict[str, Any]) -> Dict[str, str]:
+    """Gathers and returns general, static information about the Blender instance."""
+    info = {
+        "blender_version": bpy.app.version_string,
+    }
+    return info
+
+
+def handle_get_blender_context(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Gathers and returns dynamic context information about the current Blender state."""
+    context: bpy.types.Context = bpy.context
+    window: Optional[bpy.types.Window] = context.window
+    screen: Optional[bpy.types.Screen] = bpy.context.screen
+
+    info = {
+        "active_window_type": window.type if window else "N/A",
+        "active_screen_name": screen.name if screen else "N/A",
+        "mode": context.mode,
+    }
+    return info
+
+
+# --- Grease Pencil Helper Functions ---
+
+
+def _get_active_gpencil() -> bpy.types.Object:
+    """Gets the active Grease Pencil object, or creates one if none exists."""
+    # Check for active object that is a Grease Pencil object
+    active_obj: Optional[bpy.types.Object] = bpy.context.active_object
+    if active_obj and active_obj.type == "GPENCIL":
+        return active_obj
+
+    # If the active object is not a Grease Pencil object, search the scene
+    obj: bpy.types.Object
+    for obj in bpy.context.scene.objects:
+        if obj.type == "GPENCIL":
+            bpy.context.view_layer.objects.active = obj
+            return obj
+
+    # If no Grease Pencil object exists in the scene, create a new one
+    bpy.ops.object.gpencil_add(location=(0, 0, 0), type="EMPTY")
+    return bpy.context.active_object
+
+
+def _get_or_create_gp_layer(
+    gp_data: bpy.types.GreasePencilData, layer_name: str, clear_layer: bool = False
+) -> Tuple[bpy.types.GPencilLayer, bpy.types.GPencilFrame]:
+    """Gets or creates a Grease Pencil layer and optionally clears it."""
+    layer: bpy.types.GPencilLayer
+    if layer_name in gp_data.layers:
+        layer = gp_data.layers[layer_name]
+        if clear_layer:
+            # Clear all strokes from all frames in the layer
+            frame: bpy.types.GPencilFrame
+            for frame in layer.frames:
+                frame.clear()
+    else:
+        layer = gp_data.layers.new(layer_name, set_active=True)
+
+    gp_data.layers.active = layer
+
+    # Ensure the layer has a frame to draw on
+    if not layer.frames:
+        # Use current scene frame, or frame 1 if it's 0
+        frame_num: int = (
+            bpy.context.scene.frame_current
+            if bpy.context.scene.frame_current > 0
+            else 1
+        )
+        layer.frames.new(frame_number=frame_num)
+
+    active_frame: bpy.types.GPencilFrame = layer.active_frame
+
+    return layer, active_frame
+
+
+def _get_or_create_material(
+    gp_obj: bpy.types.Object,
+    material_name: str,
+    color_rgba: Tuple[float, float, float, float],
+) -> bpy.types.Material:
+    """Gets or creates a Grease Pencil material and adds it to the object."""
+    material: bpy.types.Material
+    if material_name in bpy.data.materials:
+        material = bpy.data.materials[material_name]
+    else:
+        material = bpy.data.materials.new(name=material_name)
+        bpy.data.materials.create_gp_material(material)
+        material.grease_pencil.color = color_rgba
+
+    if material.name not in gp_obj.material_slots:
+        gp_obj.material_slots.append(material)
+
+    return material
+
+
+# --- Grease Pencil Command Handlers ---
+
+
+def handle_draw_stroke(payload: Dict[str, Any]) -> Dict[str, str]:
+    """Draws a stroke from a list of points on a specified layer with a given color."""
+    # Validate payload
+    required_keys: List[str] = ["layer_name", "color", "points"]
+    if not all(k in payload for k in required_keys):
+        raise ValueError(f"Payload for 'draw_stroke' must contain {required_keys}.")
+    if not payload["points"]:
+        return {"status": "success", "message": "No points provided, nothing to draw."}
+
+    gp_obj: bpy.types.Object = _get_active_gpencil()
+    gp_data: bpy.types.GreasePencilData = gp_obj.data
+
+    # Get or create the layer and ensure it has an active frame
+    clear_layer: bool = payload.get("clear_layer", False)
+    layer: bpy.types.GPencilLayer
+    frame: bpy.types.GPencilFrame
+    layer, frame = _get_or_create_gp_layer(gp_data, payload["layer_name"], clear_layer)
+    if not frame:
+        raise RuntimeError(
+            f"Could not find or create a frame for layer '{payload['layer_name']}'."
+        )
+
+    # Get or create the material for the color
+    color_rgba: Tuple[float, float, float, float] = tuple(payload["color"])
+    material_name: str = f"GP_Color_{color_rgba[0]:.3f}_{color_rgba[1]:.3f}_{color_rgba[2]:.3f}_{color_rgba[3]:.3f}"
+    material: bpy.types.Material = _get_or_create_material(
+        gp_obj, material_name, color_rgba
+    )
+
+    # Create the stroke
+    stroke: bpy.types.GPencilStroke = frame.strokes.new()
+    stroke.material_index = gp_obj.material_slots.find(material.name)
+
+    # Add points to the stroke
+    points_data: List[Dict[str, float]] = payload["points"]
+    stroke.points.add(count=len(points_data))
+
+    for i, p_data in enumerate(points_data):
+        stroke.points[i].position = (
+            p_data.get("x", 0),
+            p_data.get("y", 0),
+            p_data.get("z", 0),
+        )
+        stroke.points[i].pressure = p_data.get("pressure", 1.0)
+        stroke.points[i].strength = p_data.get("strength", 1.0)
+
+    return {
+        "message": f"Stroke with {len(points_data)} points drawn on layer '{payload['layer_name']}'."
+    }
+
+
+def handle_draw_circle(payload: Dict[str, Any]) -> Dict[str, str]:
+    """Draws a circle on a specified layer with a given color."""
+    # Validate payload
+    required_keys: List[str] = ["layer_name", "color", "radius"]
+    if not all(k in payload for k in required_keys):
+        raise ValueError(f"Payload for 'draw_circle' must contain {required_keys}.")
+
+    # Get parameters from payload
+    center = payload.get("center", (0, 0, 0))
+    radius = payload["radius"]
+    segments = payload.get("segments", 64)  # Increased for smoother circle
+    pressure = payload.get("pressure", 1.0)
+    strength = payload.get("strength", 1.0)
+
+    # Generate points for a circle on the XZ plane (top-down view)
+    points: List[Dict[str, float]] = []
+    for i in range(segments + 1):
+        angle = 2 * math.pi * i / segments
+        x = center[0] + radius * math.cos(angle)
+        y = center[1]
+        z = center[2] + radius * math.sin(angle)
+        points.append(
+            {"x": x, "y": y, "z": z, "pressure": pressure, "strength": strength}
+        )
+
+    # Construct a payload for the handle_draw_stroke function and call it
+    stroke_payload = {
+        "layer_name": payload["layer_name"],
+        "color": payload["color"],
+        "points": points,
+        "clear_layer": payload.get("clear_layer", False),
+    }
+
+    # Directly call the function to reuse the logic
+    return handle_draw_stroke(stroke_payload)
+
+
+def handle_render_image(payload: Dict[str, Any]) -> Dict[str, str]:
+    """Renders the current Blender scene to an image file and returns its path."""
+    scene: bpy.types.Scene = bpy.context.scene
+
+    # Get parameters from payload, or use scene defaults
+    output_path: Optional[str] = payload.get("output_path")
+    resolution_x: int = payload.get("resolution_x", scene.render.resolution_x)
+    resolution_y: int = payload.get("resolution_y", scene.render.resolution_y)
+    file_format: str = payload.get("file_format", "PNG")  # Default to PNG
+    frame: int = payload.get("frame", scene.frame_current)
+
+    # Validate file format (Blender expects uppercase)
+    file_format = file_format.upper()
+    # List of supported formats. Blender might support more, but these are common.
+    supported_formats = ["PNG", "JPEG", "BMP", "TARGA", "OPEN_EXR", "TIFF"]
+    if file_format not in supported_formats:
+        raise ValueError(
+            f"Unsupported file format: '{file_format}'. Supported formats are: {', '.join(supported_formats)}"
+        )
+
+    # Set up render settings
+    scene.render.resolution_x = resolution_x
+    scene.render.resolution_y = resolution_y
+    scene.render.image_settings.file_format = file_format
+    scene.frame_current = frame
+
+    # Determine output path
+    if not output_path:
+        # Create a temporary directory if output_path is not provided
+        temp_dir = tempfile.mkdtemp(prefix="mindraw_blender_render_")
+        output_file_name = f"render_frame_{frame}.{file_format.lower()}"
+        output_path = os.path.join(temp_dir, output_file_name)
+    else:
+        # Ensure the directory for the provided path exists
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+    scene.render.filepath = output_path
+
+    # Perform the render
+    try:
+        # write_still=True ensures a single image is rendered to the filepath
+        bpy.ops.render.render(write_still=True)
+    except Exception as e:
+        raise RuntimeError(f"Blender rendering failed: {e}")
+
+    # Return the path to the rendered image
+    return {"status": "success", "image_path": output_path}
+
+
 # Command to Handler mapping
 COMMAND_MAP = {
     "execute_code": handle_execute_code,
     "get_scene_info": handle_get_scene_info,
+    "get_blender_info": handle_get_blender_info,
+    "get_blender_context": handle_get_blender_context,
+    "draw_stroke": handle_draw_stroke,
+    "draw_circle": handle_draw_circle,
+    "render_image": handle_render_image,
 }
 
 
