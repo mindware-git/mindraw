@@ -89,12 +89,6 @@ mcp = FastMCP("Blender MCP")
 
 
 @mcp.tool
-def add(a: int, b: int) -> int:
-    """Add two numbers"""
-    return a + b
-
-
-@mcp.tool
 def execute_blender_command(python_code: str) -> str:
     """Blender에서 Python 코드를 실행하고 결과를 반환합니다
 
