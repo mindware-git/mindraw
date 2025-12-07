@@ -92,7 +92,9 @@ def handle_get_scene_info(payload: Dict[str, Any]) -> Dict[str, Any]:
     info = {
         "scene_name": scene.name,
         "object_count": len(scene.objects),
-        "active_object": context.active_object.name if context.active_object else None,
+        "active_object": context.view_layer.objects.active.name
+        if context.view_layer.objects.active
+        else None,
         "selected_objects": [obj.name for obj in context.selected_objects],
         "mode": context.mode,
     }
@@ -127,7 +129,7 @@ def handle_get_blender_context(payload: Dict[str, Any]) -> Dict[str, Any]:
 def _get_active_gpencil() -> bpy.types.Object:
     """Gets the active Grease Pencil object, or creates one if none exists."""
     # Check for active object that is a Grease Pencil object
-    active_obj: Optional[bpy.types.Object] = bpy.context.active_object
+    active_obj: Optional[bpy.types.Object] = bpy.context.view_layer.objects.active
     if active_obj and active_obj.type == "GPENCIL":
         return active_obj
 
@@ -140,19 +142,19 @@ def _get_active_gpencil() -> bpy.types.Object:
 
     # If no Grease Pencil object exists in the scene, create a new one
     bpy.ops.object.gpencil_add(location=(0, 0, 0), type="EMPTY")
-    return bpy.context.active_object
+    return bpy.context.view_layer.objects.active
 
 
 def _get_or_create_gp_layer(
-    gp_data: bpy.types.GreasePencilData, layer_name: str, clear_layer: bool = False
-) -> Tuple[bpy.types.GPencilLayer, bpy.types.GPencilFrame]:
+    gp_data: bpy.types.GreasePencil, layer_name: str, clear_layer: bool = False
+) -> Tuple[bpy.types.GreasePencilLayer, bpy.types.GreasePencilFrame]:
     """Gets or creates a Grease Pencil layer and optionally clears it."""
-    layer: bpy.types.GPencilLayer
+    layer: bpy.types.GreasePencilLayer
     if layer_name in gp_data.layers:
         layer = gp_data.layers[layer_name]
         if clear_layer:
             # Clear all strokes from all frames in the layer
-            frame: bpy.types.GPencilFrame
+            frame: bpy.types.GreasePencilFrame
             for frame in layer.frames:
                 frame.clear()
     else:
@@ -170,7 +172,7 @@ def _get_or_create_gp_layer(
         )
         layer.frames.new(frame_number=frame_num)
 
-    active_frame: bpy.types.GPencilFrame = layer.active_frame
+    active_frame: bpy.types.GreasePencilFrame = layer.active_frame
 
     return layer, active_frame
 
@@ -208,12 +210,12 @@ def handle_draw_stroke(payload: Dict[str, Any]) -> Dict[str, str]:
         return {"status": "success", "message": "No points provided, nothing to draw."}
 
     gp_obj: bpy.types.Object = _get_active_gpencil()
-    gp_data: bpy.types.GreasePencilData = gp_obj.data
+    gp_data: bpy.types.GreasePencil = gp_obj.data
 
     # Get or create the layer and ensure it has an active frame
     clear_layer: bool = payload.get("clear_layer", False)
-    layer: bpy.types.GPencilLayer
-    frame: bpy.types.GPencilFrame
+    layer: bpy.types.GreasePencilLayer
+    frame: bpy.types.GreasePencilFrame
     layer, frame = _get_or_create_gp_layer(gp_data, payload["layer_name"], clear_layer)
     if not frame:
         raise RuntimeError(
@@ -228,7 +230,7 @@ def handle_draw_stroke(payload: Dict[str, Any]) -> Dict[str, str]:
     )
 
     # Create the stroke
-    stroke: bpy.types.GPencilStroke = frame.strokes.new()
+    stroke: bpy.types.GreasePencilStroke = frame.strokes.new()
     stroke.material_index = gp_obj.material_slots.find(material.name)
 
     # Add points to the stroke
