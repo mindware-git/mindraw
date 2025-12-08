@@ -1,10 +1,13 @@
 # server.py
 from fastmcp import FastMCP
+from fastmcp.utilities.types import Image
 import socket
 import threading
 import time
 import json
 from typing import List, Dict
+import base64
+import os
 
 # 전역 소켓 연결 변수
 blender_socket = None
@@ -187,28 +190,63 @@ def get_connection_status() -> str:
         else:
             return "DISCONNECTED: Blender에 연결되어 있지 않습니다"
 
+
 @mcp.tool
 def draw_stroke(points: List[Dict]) -> str:
     """
     Blender에 Grease Pencil stroke를 그립니다.
-    
+
     Args:
         points: stroke를 구성하는 점들의 리스트. 각 점은 x, z 좌표를 가져야 합니다.
         중요한 점은 Grease Pencil의 경우 (X-Z plan)
         예: [{"x": 0.0, "z": 0.0}, {"x": 1.0, "z": 0.0}]
-    
+
     Returns:
         실행 결과 또는 에러 메시지
     """
     # str to list[dict]
 
     response = _send_blender_command("draw_stroke", {"points": points})
-    
+
     if response.get("status") == "success":
         return response.get("data", {}).get("message", "Stroke drawn successfully")
     else:
         error_msg = response.get("error_message", "Unknown error.")
         return f"ERROR: {error_msg}"
+
+
+@mcp.tool
+def render_image(output_path: str = None) -> Image:
+    """
+    Blender의 현재 씬을 렌더링하고 렌더링된 이미지의 Base64 인코딩 문자열을 반환합니다.
+    Args:
+        output_path: 이미지를 저장할 경로 (선택 사항). 제공되지 않으면 임시 파일이 사용됩니다.
+    Returns:
+        Base64 인코딩된 이미지 데이터 문자열 또는 에러 메시지
+    """
+    payload = {}
+    if output_path:
+        payload["output_path"] = output_path
+
+    response = _send_blender_command("render_image", payload)
+
+    if response.get("status") == "success":
+        image_path = response.get("data", {}).get("image_path")
+        if image_path and os.path.exists(image_path):
+            try:
+                with open(image_path, "rb") as image_file:
+                    encoded_image = base64.b64encode(image_file.read()).decode("utf-8")
+
+                # Assuming the image rendered by Blender is always PNG
+                return Image(data=encoded_image, mime_type="image/png")
+            except Exception as e:
+                # Re-raise the exception or return an error Image object
+                raise Exception(f"ERROR: Failed to read or encode image: {str(e)}")
+        else:
+            raise Exception("ERROR: Image path not returned or file not found.")
+    else:
+        error_msg = response.get("error_message", "Unknown error.")
+        raise Exception(f"ERROR: {error_msg}")
 
 
 if __name__ == "__main__":

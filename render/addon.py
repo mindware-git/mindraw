@@ -130,7 +130,7 @@ def _get_active_gpencil() -> bpy.types.Object:
     active_obj: Optional[bpy.types.Object] = bpy.context.view_layer.objects.active
     if active_obj and active_obj.type == "GREASEPENCIL":
         return active_obj
-    return 
+    return
 
 
 def _get_or_create_gp_layer(
@@ -215,9 +215,7 @@ def handle_draw_stroke(payload: Dict[str, Any]) -> Dict[str, str]:
             p_data.get("z", 0),
         )
 
-    return {
-        "message": f"Stroke with {len(points_data)} points drawn on layer."
-    }
+    return {"message": f"Stroke with {len(points_data)} points drawn on layer."}
 
 
 def handle_draw_circle(payload: Dict[str, Any]) -> Dict[str, str]:
