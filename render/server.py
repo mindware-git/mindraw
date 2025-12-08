@@ -4,6 +4,7 @@ import socket
 import threading
 import time
 import json
+from typing import List, Dict
 
 # 전역 소켓 연결 변수
 blender_socket = None
@@ -185,6 +186,29 @@ def get_connection_status() -> str:
             return "CONNECTED: Blender에 정상적으로 연결되어 있습니다"
         else:
             return "DISCONNECTED: Blender에 연결되어 있지 않습니다"
+
+@mcp.tool
+def draw_stroke(points: List[Dict]) -> str:
+    """
+    Blender에 Grease Pencil stroke를 그립니다.
+    
+    Args:
+        points: stroke를 구성하는 점들의 리스트. 각 점은 x, z 좌표를 가져야 합니다.
+        중요한 점은 Grease Pencil의 경우 (X-Z plan)
+        예: [{"x": 0.0, "z": 0.0}, {"x": 1.0, "z": 0.0}]
+    
+    Returns:
+        실행 결과 또는 에러 메시지
+    """
+    # str to list[dict]
+
+    response = _send_blender_command("draw_stroke", {"points": points})
+    
+    if response.get("status") == "success":
+        return response.get("data", {}).get("message", "Stroke drawn successfully")
+    else:
+        error_msg = response.get("error_message", "Unknown error.")
+        return f"ERROR: {error_msg}"
 
 
 if __name__ == "__main__":

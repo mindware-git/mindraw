@@ -81,7 +81,6 @@ class TestMindDrawAddon(unittest.TestCase):
         self.assertIn("scene_name", data)
         self.assertIn("object_count", data)
         self.assertIn("active_object", data)
-        self.assertIn("selected_objects", data)
         self.assertIn("mode", data)
         print("  Success: Received valid scene info.")
 

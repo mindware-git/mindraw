@@ -89,14 +89,12 @@ def handle_get_scene_info(payload: Dict[str, Any]) -> Dict[str, Any]:
     """Gathers and returns basic information about the current scene."""
     context: bpy.types.Context = bpy.context
     scene: bpy.types.Scene = context.scene
+    obj = context.view_layer.objects.active
     info = {
         "scene_name": scene.name,
         "object_count": len(scene.objects),
-        "active_object": context.view_layer.objects.active.name
-        if context.view_layer.objects.active
-        else None,
-        "selected_objects": [obj.name for obj in context.selected_objects],
-        "mode": context.mode,
+        "active_object": obj.name,
+        "mode": obj.mode,
     }
     return info
 
@@ -130,19 +128,9 @@ def _get_active_gpencil() -> bpy.types.Object:
     """Gets the active Grease Pencil object, or creates one if none exists."""
     # Check for active object that is a Grease Pencil object
     active_obj: Optional[bpy.types.Object] = bpy.context.view_layer.objects.active
-    if active_obj and active_obj.type == "GPENCIL":
+    if active_obj and active_obj.type == "GREASEPENCIL":
         return active_obj
-
-    # If the active object is not a Grease Pencil object, search the scene
-    obj: bpy.types.Object
-    for obj in bpy.context.scene.objects:
-        if obj.type == "GPENCIL":
-            bpy.context.view_layer.objects.active = obj
-            return obj
-
-    # If no Grease Pencil object exists in the scene, create a new one
-    bpy.ops.object.gpencil_add(location=(0, 0, 0), type="EMPTY")
-    return bpy.context.view_layer.objects.active
+    return 
 
 
 def _get_or_create_gp_layer(
@@ -203,7 +191,7 @@ def _get_or_create_material(
 def handle_draw_stroke(payload: Dict[str, Any]) -> Dict[str, str]:
     """Draws a stroke from a list of points on a specified layer with a given color."""
     # Validate payload
-    required_keys: List[str] = ["layer_name", "color", "points"]
+    required_keys: List[str] = ["points"]
     if not all(k in payload for k in required_keys):
         raise ValueError(f"Payload for 'draw_stroke' must contain {required_keys}.")
     if not payload["points"]:
@@ -211,31 +199,14 @@ def handle_draw_stroke(payload: Dict[str, Any]) -> Dict[str, str]:
 
     gp_obj: bpy.types.Object = _get_active_gpencil()
     gp_data: bpy.types.GreasePencil = gp_obj.data
+    layer = gp_data.layers["Lines"]
+    frame = layer.frames[0]
+    drawing = frame.drawing
 
-    # Get or create the layer and ensure it has an active frame
-    clear_layer: bool = payload.get("clear_layer", False)
-    layer: bpy.types.GreasePencilLayer
-    frame: bpy.types.GreasePencilFrame
-    layer, frame = _get_or_create_gp_layer(gp_data, payload["layer_name"], clear_layer)
-    if not frame:
-        raise RuntimeError(
-            f"Could not find or create a frame for layer '{payload['layer_name']}'."
-        )
-
-    # Get or create the material for the color
-    color_rgba: Tuple[float, float, float, float] = tuple(payload["color"])
-    material_name: str = f"GP_Color_{color_rgba[0]:.3f}_{color_rgba[1]:.3f}_{color_rgba[2]:.3f}_{color_rgba[3]:.3f}"
-    material: bpy.types.Material = _get_or_create_material(
-        gp_obj, material_name, color_rgba
-    )
-
-    # Create the stroke
-    stroke: bpy.types.GreasePencilStroke = frame.strokes.new()
-    stroke.material_index = gp_obj.material_slots.find(material.name)
-
-    # Add points to the stroke
     points_data: List[Dict[str, float]] = payload["points"]
-    stroke.points.add(count=len(points_data))
+    drawing.add_strokes([len(points_data)])
+
+    stroke = drawing.strokes[-1]
 
     for i, p_data in enumerate(points_data):
         stroke.points[i].position = (
@@ -243,11 +214,9 @@ def handle_draw_stroke(payload: Dict[str, Any]) -> Dict[str, str]:
             p_data.get("y", 0),
             p_data.get("z", 0),
         )
-        stroke.points[i].pressure = p_data.get("pressure", 1.0)
-        stroke.points[i].strength = p_data.get("strength", 1.0)
 
     return {
-        "message": f"Stroke with {len(points_data)} points drawn on layer '{payload['layer_name']}'."
+        "message": f"Stroke with {len(points_data)} points drawn on layer."
     }
 
 
